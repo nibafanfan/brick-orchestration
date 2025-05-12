@@ -1,0 +1,37 @@
+# {{ brick_name }}
+
+## 🔍 Overview
+{{ description }}
+
+## 📦 Data Source
+{% for src in source %}
+- **{{ src.name }}**  
+  {% if src.url %}URL: [{{ src.url }}]({{ src.url }}){% endif %}
+  {% if src.citation %}<br>Citation: {{ src.citation }}{% endif %}
+  {% if src.license %}<br>License: {{ src.license }}{% endif %}
+{% endfor %}
+
+## 🔄 Transformations
+{{ transformations }}
+
+## 📁 Assets
+{% for asset in assets %}
+- `{{ asset.file }}` ({{ asset.format }}): {{ asset.description }}
+{% endfor %}
+
+## 🧪 Usage
+```bash
+biobricks install {{ brick_name }}
+
+import biobricks as bb
+import pandas as pd
+
+paths = bb.assets("{{ brick_name }}")
+print(paths)
+
+# Available assets:
+{% for key in asset_keys %}
+df_{{ loop.index }} = pd.read_parquet(paths.{{ key }})
+{% endfor %}
+
+    # Preview the first asset

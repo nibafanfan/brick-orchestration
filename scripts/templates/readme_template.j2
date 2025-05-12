@@ -1,0 +1,35 @@
+# {{ brick_name }}
+
+## 🔍 Overview
+{{ description }}
+
+## 📦 Data Source
+- **{{ src.name }}**  
+  URL: {{ src.url }}{% if src.citation %}  
+  Citation: {{ src.citation }}{% endif %}{% if src.license %}<br>License: {{ src.license }}{% endif %}
+
+## 🔄 Transformations
+{{ transformations }}
+
+## 📁 Assets
+{% for a in assets -%}
+- `{{ a.file }}` ({{ a.format }}): {{ a.description }}
+{%- endfor %}
+
+## 🧪 Usage
+```bash
+biobricks install {{ brick_name }}
+```
+
+```python
+import biobricks as bb
+import pandas as pd
+
+paths = bb.assets("{{ brick_name }}")
+{% for a in assets if a.format in ["PARQUET","CSV","TSV","JSON"] -%}
+df_{{ loop.index }} = pd.read_{{ "parquet" if a.format=="PARQUET" else "csv" }}(
+    paths.{{ a.file.replace('.','_').replace('-','_') }}
+)
+{%- endfor %}
+print(df_1.head())
+```
