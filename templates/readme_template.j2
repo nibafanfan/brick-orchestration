@@ -1,25 +1,42 @@
 # {{ brick_name }}
 
+## 🧠 Summary (Auto-generated)
+{{ gpt_summary }}
+
+---
+
 ## 🔍 Overview
 {{ description }}
 
 ## 📦 Data Source
+{% if source is iterable and source is not string %}
 {% for src in source %}
-- **{{ src.name }}**  
-  {% if src.url %}URL: [{{ src.url }}]({{ src.url }}){% endif %}
-  {% if src.citation %}<br>Citation: {{ src.citation }}{% endif %}
-  {% if src.license %}<br>License: {{ src.license }}{% endif %}
+- **{{ src.name if src.name else src }}**
+  {% if src.url %}  
+  URL: [{{ src.url }}]({{ src.url }}){% endif %}
+  {% if src.citation %}  
+  Citation: {{ src.citation }}{% endif %}
+  {% if src.license %}  
+  License: {{ src.license }}{% endif %}
 {% endfor %}
+{% else %}
+- {{ source }}
+{% endif %}
 
 ## 🔄 Transformations
-{{ transformations }}
+{{ transformations if transformations else "None documented." }}
 
 ## 📁 Assets
+{% if assets %}
 {% for asset in assets %}
 - `{{ asset.file }}` ({{ asset.format }}): {{ asset.description }}
 {% endfor %}
+{% else %}
+No assets listed.
+{% endif %}
 
 ## 🧪 Usage
+
 ```bash
 biobricks install {{ brick_name }}
 
@@ -33,5 +50,3 @@ print(paths)
 {% for key in asset_keys %}
 df_{{ loop.index }} = pd.read_parquet(paths.{{ key }})
 {% endfor %}
-
-    # Preview the first asset

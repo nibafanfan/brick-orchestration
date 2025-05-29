@@ -31,5 +31,4 @@ df_{{ loop.index }} = pd.read_{{ "parquet" if a.format=="PARQUET" else "csv" }}(
     paths.{{ a.file.replace('.','_').replace('-','_') }}
 )
 {%- endfor %}
-print(df_1.head())
 ```
