@@ -1,176 +1,208 @@
+#!/usr/bin/env python3
+"""
+Enrich_Meta_Gpt.py — refresh / create brick_repos/<brick>/meta.yaml
+───────────────────────────────────────────────────────────────────
+Adds a *complete* `assets:` list by merging:
+  • biobricks.assets(<brick>)                (if available locally)
+  • every *.parquet / *.csv / … actually sitting in brick/
+  • regex scrape of status.biobricks.ai      (fallback)
 
-from dotenv import load_dotenv
-import os
-import yaml
-import openai
-import requests
-import re
-from pathlib import Path
-from bs4 import BeautifulSoup
+Usage
+─────
+# one brick
+python scripts/Enrich_Meta_Gpt.py --brick chembl --overwrite
 
-# Load environment variables from .env file
-load_dotenv()
-
-BRICKS_DIR = Path("brick_repos")
-openai.api_key = os.environ.get("OPENAI_API_KEY")
-
-META_TEMPLATE = {
-    "title": "",
-    "description": "",
-    "source": [],
-    "license": "",
-    "tags": [],
-    "assets": [],
-    "transformations": ""
-}
-
-MARK = "<!-- AUTO‑GENERATED‑README‑START -->"
-
-def extract_manual_section(readme_path):
-    if not readme_path.exists():
-        return ""
-    text = readme_path.read_text(encoding="utf-8")
-    return text.split(MARK, 1)[0].strip()
-
-def scrape_status_biobricks(brick_name):
-    url = f"https://status.biobricks.ai/brick/{brick_name}"
-    try:
-        response = requests.get(url, timeout=10)
-        soup = BeautifulSoup(response.text, "html.parser")
-        text = soup.get_text()
-        return text.strip()
-    except Exception as e:
-        print(f"⚠️ Failed to scrape status.biobricks.ai for {brick_name}: {e}")
-        return ""
-
-def extract_assets_from_status(scraped_text):
-    assets = []
-    matches = re.findall(r"(\S+\.(?:parquet|csv|tsv|json|sqlite|txt))\s+(\d+(?:\.\d+)?\s*[KMG]B)", scraped_text, re.IGNORECASE)
-    for filename, size in matches:
-        ext = filename.split(".")[-1].upper()
-        assets.append({
-            "file": filename,
-            "format": ext,
-            "description": f"Auto-detected file ({size.strip()}) from status.biobricks.ai"
-        })
-    return assets
-
-def gpt_extract_meta(readme_text, scraped_text):
-    combined = f"README:\n{readme_text}\n\nBIOBRICKS STATUS PAGE:\n{scraped_text}"
-
-    prompt = f"""
-From the following content, extract metadata as a YAML dictionary with the following structure:
-
-- title: <title>
-- description: <plain-language description>
-- source:
-  - name: <source name>
-    url: <source url>
-    citation: <optional citation>
-    license: <license name>
-- license: <overall repo license if available>
-- tags: [list of relevant keywords]
-- assets:
-  - file: <filename>
-    format: <file type>
-    description: <short description>
-- transformations: <data processing summary>
-
-Only include fields you can infer. Output raw YAML only, with no code fences, markdown, or comments.
+# all bricks, fill only missing fields
+python scripts/Enrich_Meta_Gpt.py --all
 """
 
-    messages = [
-        {"role": "system", "content": "You are a dataset documentation parser."},
-        {"role": "user", "content": prompt + combined}
-    ]
+from __future__ import annotations
 
-    response = openai.ChatCompletion.create(
-        model="gpt-4",
-        messages=messages,
-        temperature=0.2
-    )
+import argparse, os, re
+from pathlib import Path
+from types import SimpleNamespace
 
-    raw_yaml = response.choices[0].message.content
-    print("\n📥 GPT Response (raw):\n", raw_yaml)
+import yaml, requests, openai, biobricks as bb
+from bs4 import BeautifulSoup
+from dotenv import load_dotenv
 
+# ───────────────────────── env / constants ─────────────────────────
+load_dotenv()
+openai.api_key = os.getenv("OPENAI_API_KEY")
+
+BRICKS_DIR = Path("brick_repos")
+MARK = "<!-- AUTO-GENERATED-README-START -->"
+
+EXT2FMT = dict(
+    parquet="Parquet", csv="CSV", tsv="TSV",
+    json="JSON", h5="HDF5", hdf5="HDF5",
+)
+
+META_TEMPLATE = dict(
+    title="",
+    description="",
+    source=[],
+    license="",
+    tags=[],
+    assets=[],
+    transformations="",
+)
+
+# ───────────────────────── helpers ─────────────────────────
+def extract_manual_section(path: Path) -> str:
+    if not path.exists():
+        return ""
+    return path.read_text(encoding="utf-8").split(MARK, 1)[0].strip()
+
+def scrape_status(brick: str) -> str:
+    url = f"https://status.biobricks.ai/brick/{brick}"
     try:
-        extracted = yaml.safe_load(raw_yaml)
-        if not isinstance(extracted, dict):
-            raise yaml.YAMLError("Parsed result was not a dictionary")
-        print("\n✅ Parsed YAML:\n", yaml.dump(extracted, sort_keys=False))
-        return extracted
-    except yaml.YAMLError as e:
-        print("⚠️ Failed to parse YAML:\n", e)
+        return BeautifulSoup(requests.get(url, timeout=10).text,
+                             "html.parser").get_text(" ", strip=True)
+    except Exception:
+        return ""
+
+def assets_from_status(text: str) -> list[dict]:
+    out = []
+    rx = r"(\S+\.(?:parquet|csv|tsv|json|sqlite|txt|h5))\s+(\d+(?:\.\d+)?\s*[KMG]B)"
+    for fn, size in re.findall(rx, text, flags=re.I):
+        out.append(dict(file=fn,
+                        format=fn.split(".")[-1].upper(),
+                        description=f"Auto-detected file ({size.strip()})"))
+    return out
+
+def assets_from_bb(brick: str) -> list[dict]:
+    try:
+        ns: SimpleNamespace = bb.assets(brick)
+    except Exception:
+        return []
+    res = []
+    for alias, pth in vars(ns).items():
+        p = Path(pth)
+        res.append(dict(file=p.name,
+                        format=EXT2FMT.get(p.suffix.lstrip('.').lower(),
+                                           p.suffix.upper()),
+                        description=alias.replace("_", " ")))
+    return res
+
+
+def assets_from_disk(brick: str) -> list[dict]:
+    """
+    Recursively walk *any* directory under brick_repos/<brick>/ and
+    collect every file with a known data-extension.  The previous
+    version stopped at brick/ ; this one goes as deep as needed.
+    """
+    root = BRICKS_DIR / brick       # start at the brick root
+    res  = []
+    for p in root.rglob("*.*"):      # depth-first search
+        if p.suffix.lstrip(".").lower() in EXT2FMT:
+            res.append(
+                dict(
+                    file=p.name,
+                    format=EXT2FMT[p.suffix.lstrip('.').lower()],
+                    description="file present in repo",
+                )
+            )
+    return res
+
+def merge_assets(*sources: list[dict]) -> list[dict]:
+    seen, merged = set(), []
+    for src in sources:
+        for d in src:
+            if d["file"] in seen:
+                continue
+            seen.add(d["file"])
+            merged.append(d)
+    return sorted(merged, key=lambda x: x["file"])
+
+# ───────────────────────── GPT excerpt (unchanged) ────────────
+def gpt_extract_meta(readme: str, status: str) -> dict:
+    if openai.api_key is None:
+        return {}
+    prompt = (
+        "Extract dataset metadata in YAML with keys:\n"
+        "title, description, source(list), license, tags(list), "
+        "assets(list of {file,format,description}), transformations.\n"
+        "Return RAW YAML only.\n\n"
+        f"README:\n{readme}\n\nSTATUS:\n{status}"
+    )
+    rsp = openai.ChatCompletion.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.2,
+        max_tokens=300,
+    )
+    try:
+        data = yaml.safe_load(rsp.choices[0].message.content)
+        return data if isinstance(data, dict) else {}
+    except Exception:
         return {}
 
-def is_stub(value):
-    if isinstance(value, str):
-        return value.strip().lower().startswith("todo")
-    if isinstance(value, list):
-        return all(is_stub(v) for v in value)
-    if isinstance(value, dict):
-        return all(is_stub(v) for v in value.values())
-    return not value
+def is_stub(v):
+    if isinstance(v, str):
+        return v.strip().lower().startswith("todo") or v.strip() == ""
+    if isinstance(v, list):
+        return all(is_stub(x) for x in v)
+    if isinstance(v, dict):
+        return all(is_stub(x) for x in v.values())
+    return not v
 
-def enrich_meta_yaml(brick_name):
-    brick_path = BRICKS_DIR / brick_name
-    readme_path = brick_path / "README.md"
-    meta_path = brick_path / "meta.yaml"
+# ───────────────────────── main enrichment ─────────────────────
+def enrich(brick: str, overwrite: bool = False):
+    path = BRICKS_DIR/brick
+    meta_p = path/"meta.yaml"
+    readme_p = path/"README.md"
 
-    manual_readme = extract_manual_section(readme_path)
-    scraped_text = scrape_status_biobricks(brick_name)
-    gpt_meta = gpt_extract_meta(manual_readme, scraped_text)
-    status_assets = extract_assets_from_status(scraped_text)
+    manual = extract_manual_section(readme_p)
+    status_txt = scrape_status(brick)
+    gpt_meta = gpt_extract_meta(manual, status_txt)
 
-    # Load existing meta
-    if meta_path.exists():
-        with open(meta_path, "r", encoding="utf-8") as f:
-            meta = yaml.safe_load(f) or {}
-    else:
-        meta = {}
+    # existing meta (if any)
+    meta = yaml.safe_load(meta_p.read_text()) if meta_p.exists() else {}
+    meta = meta or {}
 
-    # Fill missing or stub fields from GPT
-    for key, default in META_TEMPLATE.items():
-        if (not meta.get(key) or is_stub(meta.get(key))) and gpt_meta.get(key):
-            meta[key] = gpt_meta[key]
+    # assemble assets
+    if overwrite or not meta.get("assets") or is_stub(meta["assets"]):
+        meta["assets"] = merge_assets(
+            assets_from_bb(brick),
+            assets_from_disk(brick),
+            gpt_meta.get("assets", []),
+            assets_from_status(status_txt),
+        )
 
-    # Enrich assets: prefer GPT but fallback to status page
-    if (not meta.get("assets") or is_stub(meta.get("assets"))):
-        if status_assets:
-            meta["assets"] = status_assets
-            print(f"ℹ️ Used scraped asset info for {brick_name}")
-    elif meta.get("assets") and status_assets:
-        for g_asset in meta["assets"]:
-            match = next((s for s in status_assets if s["file"] == g_asset.get("file")), None)
-            if match and "size" in match["description"]:
-                g_asset["description"] = match["description"]
+    # other keys
+    for k in META_TEMPLATE:
+        if k == "assets":
+            continue
+        if overwrite or not meta.get(k) or is_stub(meta[k]):
+            if gpt_meta.get(k):
+                meta[k] = gpt_meta[k]
 
-    # Fallback for transformations
-    if "transformations" not in meta or is_stub(meta.get("transformations")):
+    if "transformations" not in meta or is_stub(meta["transformations"]):
         meta["transformations"] = "None — preserved as-is"
 
-    # Warn on missing fields from GPT
-    missing = [k for k in META_TEMPLATE if k not in gpt_meta]
-    if missing:
-        print(f"⚠️ GPT did not return: {missing}")
+    meta_p.write_text(yaml.safe_dump(meta, sort_keys=False))
+    print(f"✓ {brick}")
 
-    with open(meta_path, "w", encoding="utf-8") as f:
-        yaml.safe_dump(meta, f, sort_keys=False)
-
-    print(f"✅ {brick_name}: meta.yaml enriched")
-
+# ───────────────────────── CLI ─────────────────────────
+# ───────── CLI glue ─────────
 def main():
-    import argparse
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--brick", help="Only enrich a specific brick")
-    args = parser.parse_args()
+    ap = argparse.ArgumentParser()
+    g = ap.add_mutually_exclusive_group(required=True)
+    g.add_argument("--brick")                  # e.g. --brick chembl
+    g.add_argument("--all", action="store_true")
+    
+    # 👇 this line must exist, otherwise --overwrite is “unrecognized”
+    ap.add_argument("--overwrite", action="store_true",
+                    help="replace existing values instead of merging")
+    
+    args = ap.parse_args()
 
-    if args.brick:
-        enrich_meta_yaml(args.brick)
-    else:
-        for brick in sorted(BRICKS_DIR.iterdir()):
-            if brick.is_dir():
-                enrich_meta_yaml(brick.name)
+    bricks = ([args.brick] if args.brick else
+              sorted(p.name for p in BRICKS_DIR.iterdir() if p.is_dir()))
+    for b in bricks:
+        enrich(b, overwrite=args.overwrite)
+
 
 if __name__ == "__main__":
     main()
