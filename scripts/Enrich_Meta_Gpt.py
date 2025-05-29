@@ -1,3 +1,5 @@
+
+from dotenv import load_dotenv
 import os
 import yaml
 import openai
@@ -5,6 +7,9 @@ import requests
 import re
 from pathlib import Path
 from bs4 import BeautifulSoup
+
+# Load environment variables from .env file
+load_dotenv()
 
 BRICKS_DIR = Path("brick_repos")
 openai.api_key = os.environ.get("OPENAI_API_KEY")
